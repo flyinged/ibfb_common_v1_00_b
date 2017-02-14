@@ -46,11 +46,9 @@ Network Trash Folder
 Temporary Items
 .apdisk
 *.bak
-data/ibfb_common_v2_1_0.pao~
-hdl/vhdl/.#ibfb_comm_package.vhd.1.5
+*~
 *.swp
-*.un~
-*.vhd~
-*.do~
 *.wlf
-sim/transcript
+*CVS/
+*sim/work/
+hdl/vhdl/.#ibfb_comm_package.vhd.1.5
