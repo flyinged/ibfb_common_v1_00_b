@@ -246,12 +246,14 @@ package ibfb_comm_package is
     --The core can be used also to discard packets marked as bad. To mark a packet as bad, just replace K_EOP with some other symbol.
     component ibfb_packet_buffer is
     generic(
+        CHECK_CRC : std_logic := '0';
         K_SOP : std_logic_vector(7 downto 0);
         K_EOP : std_logic_vector(7 downto 0)
     );
     port(
         i_clk            : in  std_logic;
         i_rst            : in  std_logic;
+        o_csp_data    : out std_logic_vector(127 downto 0);
         --input
         o_next    : out std_logic;
         i_valid   : in  std_logic;
@@ -279,6 +281,7 @@ package ibfb_comm_package is
         i_clk     : in  std_logic;
         i_rst     : in  std_logic;
         i_err_rst : in  std_logic; --not used
+        o_csp_data : out std_logic_vector(127 downto 0);
         i_routing_table : in array32(0 to N_INPUT_PORTS-1);
         --input (FIFO, FWFT)
         o_next    : out std_logic_vector(0 to N_INPUT_PORTS-1);
@@ -1039,7 +1042,7 @@ signal data_r : std_logic_vector(31 downto 0);
 
 --signal ocnt_x, ocnt_y : natural range 0 to 7;
 signal ocnt : std_logic_Vector(2 downto 0);
-signal sample : std_logic;
+signal sample, not_x, not_y : std_logic;
 
 begin
 
@@ -1133,64 +1136,6 @@ sop <= '1' when (isk(3 downto 2) = "01") and
 --There's a flag for each of the possible combination <F>.
 --If FLAG(F) is set, then the packet is marked as bad (EOP is replaced by a BAD character)
 --If FLAG(F) is not set, then the packet is forwarded and the flag is set.
---
---MAIN_P : process(i_clk)
---begin
---    if rising_edge(i_clk) then
---        if (i_rst = '1') then
---            s <= (others => '1');
---        else
---            case s is
---            when X"0" =>
---                flag_update <= '0';
---                if ivalid = '1' and sop = '1' then
---                    ctrl <= b1;
---                    bpm  <= b0;
---                    if next_s = '1' then --advance only when data is sampled
---                        s <= s+1;
---                    end if;
---                else
---                    chan <= not chan;
---                end if;
---            when X"1" =>
---                if ivalid = '1' then
---                    bucket <= b2 & b3;
---                    xpos(15 downto 0) <= b0 & b1;
---                    rx_time(15 downto 0) <= b0 & b1;
---                    if next_s = '1' then
---                        s <= s+1;
---                    end if;
---                end if;
---            when X"2" =>
---                if ivalid = '1' then
---                    xpos(31 downto 16) <= b2 & b3;
---                    rx_time(31 downto 16) <= b2 & b3;
---                    ypos(15 downto  0) <= b0 & b1;
---                    if next_s = '1' then
---                        s <= s+1;
---                    end if;
---                end if;
---            when X"3" =>
---                if ivalid = '1' then
---                    ypos(31 downto 16) <= b2 & b3;
---                    crc <= b1;
---                    --eop 
---                    if next_s = '1' then
---                        flag_update <= '1';
---                        if switch_channel = '1' then
---                            chan <= not chan;
---                        end if;
---                        s <= X"0";
---                    end if;
---                end if;
---            when others =>
---                flag_update <= '0';
---                chan <= '0';
---                s <= (others => '0');
---            end case;
---        end if;
---    end if;
---end process;
 
 --advance FIFO when:
 -- a. initial state and data available (if sof=0, data is discarded)
@@ -1355,6 +1300,9 @@ BPM_COMPARATORS : for i in 0 to (BPM_N-1) generate
           else
               bpm_mask(i) <= '0';
           end if;
+
+          not_x <= bpm_mask(0) nor bpm_mask(1);
+          not_y <= bpm_mask(2) nor bpm_mask(3);
       end if;
   end process;
   --bpm_mask(i) <= '1' when bpm = bpm_id(i) else '0';
@@ -1626,7 +1574,9 @@ end process;
 pkt_discard_x <= '1' when 
                      (pkt_valid = '1') and 
                      (
-                        ((flag = '1') or (bpm_mask(1 downto 0) = "00")) or
+                        (flag = '1') or
+                        (not_x = '1') or 
+                        --(bpm_mask(1 downto 0) = "00") or
                         (off_range = '1') or
                         (rx_is_ping0 = '1' or rx_is_ping1 = '1') or
                         (eop = '0')
@@ -1635,7 +1585,9 @@ pkt_discard_x <= '1' when
 pkt_discard_y <= '1' when 
                      (pkt_valid = '1') and 
                      (
-                        ((flag = '1') or (bpm_mask(3 downto 2) = "00")) or
+                        (flag = '1') or 
+                        (not_y = '1') or 
+                        --(bpm_mask(3 downto 2) = "00") or
                         (off_range = '1') or
                         (rx_is_ping0 = '1' or rx_is_ping1 = '1') or
                         (eop = '0')
@@ -1753,17 +1705,21 @@ end architecture rtl; --of ibfb_packet_filter
 library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
+use work.pkg_crc.all;
 
 --buffers packet data from a FIFO.
 --Whenever a good packet is found, waits until the packet is read
 entity ibfb_packet_buffer is
 generic(
+    CHECK_CRC : std_logic := '0';
     K_SOP : std_logic_vector(7 downto 0);
     K_EOP : std_logic_vector(7 downto 0)
 );
 port(
     i_clk            : in  std_logic;
     i_rst            : in  std_logic;
+    --debug
+    o_csp_data       : out std_logic_vector(127 downto 0);
     --input
     o_next    : out std_logic;
     i_valid   : in  std_logic;
@@ -1785,8 +1741,30 @@ signal sr : sr_t;
 signal sop, eop, out_valid : std_logic;
 signal b0, b1, b2, b3 : std_logic_vector(7 downto 0);
 signal s : unsigned(2 downto 0);
+signal next_s : std_logic;
+
+signal crc_in  : std_logic_vector(31 downto 0);
+signal crc_out, crc_rx : std_logic_vector( 7 downto 0);
+signal crc_valid, crc_rst, crc_good, crc_good_r : std_logic;
 
 begin
+
+--DEBUG
+o_csp_data( 31 downto   0) <= i_data;
+o_csp_data( 35 downto  32) <= i_charisk;
+o_csp_data(            36) <= i_valid;
+o_csp_data(            37) <= next_s;
+o_csp_data( 40 downto  38) <= std_logic_vector(s);
+o_csp_data(            41) <= sop;
+o_csp_data(            42) <= eop;
+o_csp_data(            43) <= out_valid;
+o_csp_data( 79 downto  44) <= sr(3);
+o_csp_data(            80) <= i_next;   
+o_csp_data(            81) <= crc_rst;   
+o_csp_data(            82) <= crc_valid;   
+o_csp_data(            83) <= crc_good;   
+o_csp_data( 91 downto  84) <= crc_out;   
+o_csp_data( 99 downto  92) <= crc_rx;   
 
 b0 <= i_data( 7 downto  0);
 b1 <= i_data(15 downto  8);
@@ -1804,7 +1782,8 @@ eop <= '1' when (i_charisk(0) = '1') and
                 (b0 = K_EOP) 
            else '0';
 
-o_next <= '1' when s < "100" and i_valid = '1' else '0';
+next_s <= '1' when s < "100" and i_valid = '1' else '0';
+o_next <= next_s;
 
 MAIN_P : process(i_clk)
 begin
@@ -1819,7 +1798,11 @@ begin
                 end if;
             when "001" | "010" =>
                 if i_valid = '1' then
-                    s <= s+1;
+                    if i_charisk = X"0" then
+                        s <= s+1;
+                    else --ADDED: reset FSM on wrong packet structure 
+                        s <= "000";
+                    end if;
                 end if;
             when "011" =>
                 if i_valid = '1' then
@@ -1852,9 +1835,57 @@ begin
 end process;
 
 out_valid <= '1' when s > "011" else '0';
-o_valid   <= out_valid;
 o_charisk <= sr(3)(35 downto 32);
 o_data    <= sr(3)(31 downto  0);
+
+--LATEST ADDITION
+CHECK_CRC_G : if CHECK_CRC = '1' generate
+
+    --register packet's CRC, hold CRC computation result (to generate out_valid)
+    CRC_RX_REG_P : process(i_clk)
+    begin
+        if rising_edge(i_clk) then
+            if s = "011" and i_valid = '1' then
+                crc_rx <= b1;
+            end if;
+
+            if s = "100" then
+                crc_good_r <= crc_good;
+            elsif s = "111" then
+                crc_good_r <= '0';
+            end if;
+        end if;
+    end process;
+
+    --force RX crc field to 0x00 for computation
+    crc_in(31 downto 16) <= i_data(31 downto 16);
+    crc_in(15 downto  8) <= X"00" when s = "011" else
+                            i_data(15 downto  8);
+    crc_in( 7 downto  0) <= i_data( 7 downto  0);
+
+    crc_valid <= '1' when (i_valid = '1') and (s(2) = '0') else
+                 '0';
+
+    crc_rst   <= '1' when (s = "000" and i_valid = '0') or (s(2) = '1') else '0';  
+
+    CRC_CALC_I : crc8_in32
+    port map( 
+        data_in => crc_in,
+        crc_en  => crc_valid,
+        rst     => crc_rst,
+        clk     => i_clk,
+        crc_out => crc_out
+    );
+
+    crc_good <= '1' when crc_out = crc_rx else '0';
+
+    o_valid   <= out_valid and (crc_good or crc_good_r);
+end generate; --CHECK_CRC_G
+
+NCHECK_CRC_G : if CHECK_CRC = '0' generate
+    --crc_good <= '1';
+    o_valid   <= out_valid;
+end generate; --NCHECK_CRC_G
 
 end architecture rtl; --of ibfb_packet_buffer
 
@@ -1878,6 +1909,7 @@ port(
     i_clk     : in  std_logic;
     i_rst     : in  std_logic;
     i_err_rst : in  std_logic; --not used
+    o_csp_data : out std_logic_vector(127 downto 0);
     i_routing_table : in array32(0 to N_INPUT_PORTS-1); --i_routing_table(i)(o) = 1 => input(i) is forwarded to output(o)
     --input
     o_next    : out std_logic_vector(0 to N_INPUT_PORTS-1);
@@ -1919,19 +1951,26 @@ signal next_port : nat_array(0 to N_INPUT_PORTS-1);
 
 signal routing_table : array32(0 to N_INPUT_PORTS-1); 
 
+type array128 is array(natural range <>) of std_logic_vector(127 downto 0);
+signal buf_csp_data : array128(0 to N_INPUT_PORTS-1);
+
 begin
+
+o_csp_data <= buf_csp_data(0);
 
 --Generate one packet buffer for each of the input channels
 ICHAN_G : for i in 0 to N_INPUT_PORTS-1 generate
 
     PKT_BUF_I : ibfb_packet_buffer
     generic map(
+        CHECK_CRC => '1',
         K_SOP => K_SOP,
         K_EOP => K_EOP
     )
     port map(
         i_clk     => i_clk,
         i_rst     => i_rst,
+        o_csp_data => buf_csp_data(i),
         --input
         o_next    => o_next(i),
         i_valid   => i_valid(i),
@@ -2966,13 +3005,13 @@ begin
                         o_output_data_x(31 downto 8) <= ypos(23 downto 16) & ypos(31 downto 24)  & crc;
                         o_output_data_y(31 downto 8) <= ypos(23 downto 16) & ypos(31 downto 24)  & crc;
 
-                        if pkt_discard_x = '1' or i_eop = '0' then
+                        if pkt_discard_x = '1' then
                             o_output_data_x(7 downto 0) <= K_BAD;
                         else      
                             o_output_data_x(7 downto 0) <= K_EOP;
                         end if;
 
-                        if pkt_discard_y = '1' or i_eop = '0' then
+                        if pkt_discard_y = '1' then
                             o_output_data_y(7 downto 0) <= K_BAD;
                         else      
                             o_output_data_y(7 downto 0) <= K_EOP;
